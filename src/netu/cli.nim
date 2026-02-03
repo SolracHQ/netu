@@ -1,11 +1,21 @@
-## CLI module - Contains all verb implementations for the NETU command-line interface
+## CLI module - Presentation layer for NETU command-line interface
+## Only handles parsing inputs and formatting outputs
 
 import ipaddress
+import loaders
 import errors
-import formats/[json, csv, text]
-import std/sets
-import std/os
+import operations/contains as containsOp
+import operations/info as infoOp
+import operations/hosts as hostsOp
+import operations/classify as classifyOp
+import presentation/contains as containsPresentation
+import presentation/info as infoPresentation
+export infoPresentation.InfoOutputFormat
+import presentation/iplist
+import presentation/classify as classifyPresentation
+export classifyPresentation.ClassifyOutputFormat
 import std/strutils
+import std/sets
 
 # ============================================================================
 # Helper Functions
@@ -16,96 +26,116 @@ proc fail(message: string): int =
   stderr.writeLine("Error: " & message)
   return 1
 
-proc loadCidrsFromFiles(paths: seq[string]): HashSet[Cidr] =
-  ## Load CIDRs from multiple files, automatically detecting format by extension
-  ## Supports .json, .csv, and text formats (default for unknown extensions)
-  result = initHashSet[Cidr]()
-
-  for path in paths:
-    let (_, _, ext) = splitFile(path)
-    let loadedCidrs =
-      case ext.toLowerAscii()
-      of ".json":
-        json.loadCidrsFromFile(path)
-      of ".csv":
-        csv.loadCidrsFromFile(path)
-      else:
-        text.loadCidrsFromFile(path)
-
-    for cidr in loadedCidrs:
-      result.incl(cidr)
+template quietEcho(quiet: bool, message: varargs[string, `$`]) =
+  ## Helper template to conditionally echo messages based on quiet flag
+  if not quiet:
+    for msg in message:
+      stdout.write(msg)
+    stdout.writeLine("")
 
 # ============================================================================
 # Enums for CLI Options
 # ============================================================================
 
-type OutputFormat* = enum
-  ## Output format options
-  formatText = "text" ## Newline-separated text output
-  formatJson = "json" ## JSON format
-  formatCsv = "csv" ## CSV format
+# Re-export OutputFormat from presentation layer
+import presentation/contains except writeContainsResult, presentContainsResult
 
 # ============================================================================
 # Verb Implementations
 # ============================================================================
 
-proc containsCmd*(input: seq[string] = @[], cidr: seq[string] = @[], ip: string): int =
-  ## Check if an IP address is contained in any of the input CIDRs
+proc containsCmd*(
+    cidrs: seq[string] = @[],
+    cidr: seq[string] = @[],
+    ips: seq[string] = @[],
+    ip: seq[string] = @[],
+    format: ContainsOutputFormat = formatTable,
+): int =
+  ## Check if all IP addresses are contained in at least one CIDR
   ##
   ## Examples:
-  ##   netu contains --in cidrs.json --ip "192.168.1.1"
-  ##   netu contains --in cidrs.txt --in more.json --ip "10.0.0.5"
+  ##   netu contains --cidrs cidrs.json --ip "192.168.1.1"
   ##   netu contains --cidr "192.168.1.0/24" --ip "192.168.1.1"
-  ##   netu contains --cidr "10.0.0.0/8" --cidr "172.16.0.0/12" --ip "172.16.5.100"
+  ##   netu contains --cidrs cidrs.txt --ips ips.json
+  ##   netu contains --cidr "10.0.0.0/8" --cidr "172.16.0.0/12" --ip "172.16.5.100" --ip "10.5.5.5"
+  ##   netu contains --cidr "192.168.0.0/16" --ip "192.168.1.1" --format json
 
-  if input.len == 0 and cidr.len == 0:
-    return fail("At least one input file (--in) or CIDR (--cidr) must be specified")
+  # Parse and validate arguments
+  if cidrs.len == 0 and cidr.len == 0:
+    return fail("At least one CIDR must be specified (--cidrs or --cidr)")
 
-  result = 1
+  if ips.len == 0 and ip.len == 0:
+    return fail("At least one IP must be specified (--ips or --ip)")
 
   try:
-    # Parse the IP address
-    let ipAddr = ipaddress.ipv4(ip)
+    # Load CIDRs from files and inline strings
+    let cidrSet = loadCidrs(cidrs, cidr)
 
-    var cidrs = initHashSet[Cidr]()
+    # Load IPs from files and inline strings
+    let ipSet = loadIps(ips, ip)
 
-    # Load from files if provided
-    if input.len > 0:
-      cidrs = loadCidrsFromFiles(input)
+    # Call logic function
+    let res = containsOp.contains(cidrSet, ipSet)
 
-    # Add inline CIDRs if provided
-    for cidrStr in cidr:
-      try:
-        cidrs.incl(ipaddress.cidr(cidrStr))
-      except CidrError as e:
-        return fail("Invalid CIDR '" & cidrStr & "': " & e.msg)
-      except IpV4Error as e:
-        return fail("Invalid IP in CIDR '" & cidrStr & "': " & e.msg)
+    # Call presentation with results
+    containsPresentation.writeContainsResult(res, format)
 
-    # Check if IP is contained in any CIDR
-    for c in cidrs:
-      if ipAddr in c:
-        return 0
-  except IpV4Error as e:
-    return fail("Invalid IP address '" & ip & "': " & e.msg)
+    # Return exit code based on result
+    if res.allContained:
+      return 0
+    else:
+      return 1
+  except CidrLoadError as e:
+    return fail(shortMessage(e))
+  except IpLoadError as e:
+    return fail(shortMessage(e))
   except FileError as e:
-    return fail(e.msg)
+    return fail("File error: " & e.filePath)
   except FormatError as e:
-    return fail(e.msg)
+    return fail("Format error in " & e.filePath)
   except CatchableError as e:
-    return fail(e.msg)
+    return fail("Unexpected error: " & e.msg)
 
-  return 0
-
-proc info*(cidr: string = "", ip: string = "", format: OutputFormat = formatText): int =
+proc info*(
+    cidr: string = "", ip: string = "", format: InfoOutputFormat = formatText
+): int =
   ## Show detailed information about a CIDR block or IP address
   ##
   ## Examples:
   ##   netu info --cidr "192.168.1.0/24"
   ##   netu info --ip "192.168.1.1"
-  ##   netu info --cidr "10.0.0.0/8" --format json
-  discard
-  return 0
+  ##   netu info --ip "192.168.1.1" --format json
+
+  # Parse and validate arguments
+  if cidr.len == 0 and ip.len == 0:
+    return fail("Either --cidr or --ip must be specified")
+
+  if cidr.len > 0 and ip.len > 0:
+    return fail("Cannot specify both --cidr and --ip")
+
+  try:
+    if cidr.len > 0:
+      # Parse CIDR
+      let cidrBlock = ipaddress.cidr(cidr)
+
+      # Call logic function
+      let cidrInfo = infoOp.getCidrInfo(cidrBlock)
+
+      # Call presentation with results
+      infoPresentation.writeCidrInfo(cidrInfo, format)
+    else:
+      # Parse IP
+      let ipAddr = ipaddress.ipv4(ip)
+
+      # Call logic function
+      let ipInfo = infoOp.getIpInfo(ipAddr)
+
+      # Call presentation with results
+      infoPresentation.writeIpInfo(ipInfo, format)
+
+    return 0
+  except CatchableError as e:
+    return fail("Error: " & e.msg)
 
 proc subnet*(cidr: string = "", prefix: int = 0, output: string = ""): int =
   ## Split a CIDR block into smaller subnets with a longer prefix length
@@ -116,69 +146,102 @@ proc subnet*(cidr: string = "", prefix: int = 0, output: string = ""): int =
   discard
   return 0
 
-proc supernet*(input: seq[string] = @[], output: string = ""): int =
+proc supernet*(cidrs: seq[string] = @[], output: string = ""): int =
   ## Perform supernetting on input CIDRs to combine them into larger blocks
   ##
   ## Examples:
-  ##   netu supernet --in cidrs.txt --out grouped.json
-  ##   netu supernet --in cidrs.json
+  ##   netu supernet --cidrs cidrs.txt --output grouped.json
+  ##   netu supernet --cidrs cidrs.json
   discard
   return 0
 
 proc validate*(
-    input: seq[string] = @[], strict: bool = false, quiet: bool = false
+    cidrs: seq[string] = @[], strict: bool = false, quiet: bool = false
 ): int =
   ## Validate CIDR notation and IP addresses from input files
   ##
   ## Examples:
-  ##   netu validate --in cidrs.txt
-  ##   netu validate --in cidrs.json --strict
-  ##   netu validate --in cidrs.txt --quiet
+  ##   netu validate --cidrs cidrs.txt
+  ##   netu validate --cidrs cidrs.json --strict
+  ##   netu validate --cidrs cidrs.txt --quiet
   discard
   return 0
 
 proc overlaps*(
-    input: seq[string] = @[], output: string = "", format: OutputFormat = formatText
+    cidrs: seq[string] = @[],
+    output: string = "",
+    format: ContainsOutputFormat = formatText,
 ): int =
   ## Find all overlapping CIDR blocks in the input
   ##
   ## Examples:
-  ##   netu overlaps --in cidrs.json
-  ##   netu overlaps --in cidrs.txt --output overlaps.json
-  ##   netu overlaps --in cidrs.json --format json
+  ##   netu overlaps --cidrs cidrs.json
+  ##   netu overlaps --cidrs cidrs.txt --output overlaps.json
+  ##   netu overlaps --cidrs cidrs.json --format json
   discard
   return 0
 
-proc equals*(input: seq[string] = @[], strict: bool = false): int =
+proc equals*(cidrs: seq[string] = @[], strict: bool = false): int =
   ## Check if multiple input files contain the same set of IP addresses/CIDRs
   ##
   ## Examples:
-  ##   netu equals --in a.json --in b.json
-  ##   netu equals --in cidr1.txt --in cidr2.json --in cidr3.csv
-  ##   netu equals --in a.json --in b.json --strict
+  ##   netu equals --cidrs a.json --cidrs b.json
+  ##   netu equals --cidrs cidr1.txt --cidrs cidr2.json --cidrs cidr3.csv
+  ##   netu equals --cidrs a.json --cidrs b.json --strict
   discard
   return 0
 
 proc expand*(
-    input: seq[string] = @[],
+    cidrs: seq[string] = @[],
+    cidr: seq[string] = @[],
     output: string = "",
     usableOnly: bool = false,
-    format: OutputFormat = formatText,
+    format: IpListOutputFormat = formatText,
 ): int =
   ## List all IP addresses contained in the input CIDR blocks
   ##
   ## Examples:
-  ##   netu expand --in cidrs.json --out ips.txt
-  ##   netu expand --in cidrs.txt --usable-only
-  ##   netu expand --in cidrs.json --format json
-  discard
-  return 0
+  ##   netu expand --cidrs cidrs.json --output ips.txt
+  ##   netu expand --cidrs cidrs.txt --usable-only
+  ##   netu expand --cidrs cidrs.json --format json
+  ##   netu expand --cidr "192.168.1.0/24" --format csv
+
+  # Parse and validate arguments
+  if cidrs.len == 0 and cidr.len == 0:
+    return fail("At least one CIDR must be specified (--cidrs or --cidr)")
+
+  try:
+    # Load CIDRs from files and inline strings
+    let cidrSet = loadCidrs(cidrs, cidr)
+
+    # Call logic function - collect all IPs from all CIDRs
+    var ips: seq[IpV4] = @[]
+    for cidrBlock in cidrSet.items:
+      if usableOnly:
+        let usableIps = hostsOp.getUsableHosts(cidrBlock)
+        ips.add(usableIps)
+      else:
+        let allIps = hostsOp.getAllHosts(cidrBlock)
+        ips.add(allIps)
+
+    # Call presentation with results
+    writeIpList(ips, format, output)
+
+    return 0
+  except CidrLoadError as e:
+    return fail(shortMessage(e))
+  except FileError as e:
+    return fail("File error: " & e.filePath)
+  except FormatError as e:
+    return fail("Format error in " & e.filePath)
+  except CatchableError as e:
+    return fail("Unexpected error: " & e.msg)
 
 proc hosts*(
     cidr: string = "",
     usableOnly: bool = false,
     output: string = "",
-    format: OutputFormat = formatText,
+    format: IpListOutputFormat = formatText,
 ): int =
   ## List all host IP addresses in a CIDR block
   ##
@@ -187,20 +250,83 @@ proc hosts*(
   ##   netu hosts --cidr "10.0.0.0/24" --usable-only
   ##   netu hosts --cidr "172.16.0.0/16" --output hosts.txt
   ##   netu hosts --cidr "192.168.0.0/24" --format json
-  discard
-  return 0
+
+  # Parse and validate arguments
+  if cidr.len == 0:
+    return fail("CIDR block must be specified (--cidr)")
+
+  try:
+    # Parse the CIDR
+    let cidrBlock = ipaddress.cidr(cidr)
+
+    # Call logic function
+    let ips =
+      if usableOnly:
+        hostsOp.getUsableHosts(cidrBlock)
+      else:
+        hostsOp.getAllHosts(cidrBlock)
+
+    # Call presentation with results
+    writeIpList(ips, format, output)
+
+    return 0
+  except CatchableError as e:
+    return fail("Error: " & e.msg)
 
 proc classify*(
-    input: seq[string] = @[], output: string = "", format: OutputFormat = formatText
+    cidrs: seq[string] = @[],
+    cidr: seq[string] = @[],
+    ips: seq[string] = @[],
+    ip: seq[string] = @[],
+    output: string = "",
+    format: ClassifyOutputFormat = formatText,
 ): int =
   ## Classify IP addresses and CIDR blocks (private, public, loopback, multicast, etc.)
   ##
   ## Examples:
-  ##   netu classify --in ips.txt
-  ##   netu classify --in cidrs.json --output classified.json
-  ##   netu classify --in ips.txt --format json
-  discard
-  return 0
+  ##   netu classify --cidrs ips.txt
+  ##   netu classify --cidrs cidrs.json --output classified.json
+  ##   netu classify --cidrs ips.txt --format json
+  ##   netu classify --ip "192.168.1.1" --ip "8.8.8.8" --format table
+
+  # Parse and validate arguments
+  if cidrs.len == 0 and cidr.len == 0 and ips.len == 0 and ip.len == 0:
+    return fail("At least one IP or CIDR must be specified")
+
+  try:
+    # Load IPs and CIDRs from files and inline strings
+    var allIps: seq[IpV4] = @[]
+
+    # Load IPs from files and inline strings
+    if ips.len > 0 or ip.len > 0:
+      let ipSet = loadIps(ips, ip)
+      for ipAddr in ipSet:
+        allIps.add(ipAddr)
+
+    # Load CIDRs and expand them to IPs
+    if cidrs.len > 0 or cidr.len > 0:
+      let cidrSet = loadCidrs(cidrs, cidr)
+      for cidrBlock in cidrSet:
+        for ipAddr in cidrBlock.hosts():
+          allIps.add(ipAddr)
+
+    # Call logic function
+    let clasifyResult = classifyOp.classify(allIps)
+
+    # Call presentation with results
+    classifyPresentation.writeClassifyResult(clasifyResult, format, output)
+
+    return 0
+  except CidrLoadError as e:
+    return fail(shortMessage(e))
+  except IpLoadError as e:
+    return fail(shortMessage(e))
+  except FileError as e:
+    return fail("File error: " & e.filePath)
+  except FormatError as e:
+    return fail("Format error in " & e.filePath)
+  except CatchableError as e:
+    return fail("Unexpected error: " & e.msg)
 
 # ============================================================================
 # Main CLI Entry Point
@@ -224,7 +350,7 @@ proc main*() =
 
 where {SUBCMD} is one of:
   help       print comprehensive or per-cmd help
-  contains   Check if an IP address is contained in any of the input CIDRs
+  contains   Check if all IP addresses are contained in at least one CIDR
   info       Show detailed information about a CIDR block or IP address
   subnet     Split a CIDR block into smaller subnets
   supernet   Perform supernetting on input CIDRs to combine them into larger blocks
@@ -242,20 +368,23 @@ Run "netu {SUBCMD} --help" for help on a specific subcommand.""",
       cli.containsCmd,
       cmdName = "contains",
       help = {
-        "input": "Input files containing CIDRs (JSON, CSV, or newline-separated)",
+        "cidrs": "Files containing CIDRs (JSON, CSV, or newline-separated)",
         "cidr": "CIDR block(s) to check against (can be specified multiple times)",
-        "ip": "IP address to check for containment",
+        "ips": "Files containing IP addresses",
+        "ip":
+          "IP address(es) to check (string or uint32, can be specified multiple times)",
+        "format": "Output format (text, json, table, none)",
       },
-      short = {"input": 'i', "cidr": 'c'},
+      short = {"cidrs": 's', "cidr": 'c', "ips": 'S', "ip": 'i', "format": 'f'},
     ],
     [
       cli.info,
       help = {
         "cidr": "CIDR block to get information about",
         "ip": "IP address to get information about",
-        "format": "Output format (table, json)",
+        "format": "Output format (text, json)",
       },
-      short = {"format": 'f'},
+      short = {"cidr": 'c', "ip": 'i', "format": 'f'},
     ],
     [
       cli.subnet,
@@ -269,45 +398,46 @@ Run "netu {SUBCMD} --help" for help on a specific subcommand.""",
     [
       cli.supernet,
       help = {
-        "input": "Input files containing CIDRs to combine", "output": "Output file path"
+        "cidrs": "Input files containing CIDRs to combine", "output": "Output file path"
       },
-      short = {"input": 'i', "output": 'o'},
+      short = {"cidrs": 's', "output": 'o'},
     ],
     [
       cli.validate,
       help = {
-        "input": "Input files containing CIDRs/IPs to validate",
+        "cidrs": "Input files containing CIDRs/IPs to validate",
         "strict": "Enable strict validation (check host bits)",
         "quiet": "Suppress output, only return exit code",
       },
-      short = {"input": 'i', "quiet": 'q'},
+      short = {"cidrs": 's', "quiet": 'q'},
     ],
     [
       cli.overlaps,
       help = {
-        "input": "Input files containing CIDRs to check for overlaps",
+        "cidrs": "Input files containing CIDRs to check for overlaps",
         "output": "Output file path",
-        "format": "Output format (table, json)",
+        "format": "Output format (text, json)",
       },
-      short = {"input": 'i', "output": 'o', "format": 'f'},
+      short = {"cidrs": 's', "output": 'o', "format": 'f'},
     ],
     [
       cli.equals,
       help = {
-        "input": "Input files to compare (requires at least 2)",
+        "cidrs": "Input files to compare (requires at least 2)",
         "strict": "Strict comparison (CIDR notation must match exactly)",
       },
-      short = {"input": 'i'},
+      short = {"cidrs": 's'},
     ],
     [
       cli.expand,
       help = {
-        "input": "Input files containing CIDRs to expand",
+        "cidrs": "Input files containing CIDRs to expand",
+        "cidr": "CIDR block(s) to expand (can be specified multiple times)",
         "output": "Output file path",
         "usableOnly": "Only list usable host IPs (exclude network/broadcast)",
-        "format": "Output format (text, json)",
+        "format": "Output format (text, csv, json, table)",
       },
-      short = {"input": 'i', "output": 'o', "format": 'f'},
+      short = {"cidrs": 's', "cidr": 'c', "output": 'o', "format": 'f'},
     ],
     [
       cli.hosts,
@@ -315,17 +445,21 @@ Run "netu {SUBCMD} --help" for help on a specific subcommand.""",
         "cidr": "CIDR block to list hosts from",
         "usableOnly": "Only list usable host IPs (exclude network/broadcast)",
         "output": "Output file path",
-        "format": "Output format (text, json)",
+        "format": "Output format (text, csv, json, table)",
       },
       short = {"output": 'o', "format": 'f'},
     ],
     [
       cli.classify,
       help = {
-        "input": "Input files containing IPs/CIDRs to classify",
+        "cidrs": "Input files containing IPs/CIDRs to classify",
+        "cidr": "CIDR block(s) to classify (can be specified multiple times)",
+        "ips": "Input files containing IP addresses to classify",
+        "ip": "IP address(es) to classify (can be specified multiple times)",
         "output": "Output file path",
-        "format": "Output format (table, json)",
+        "format": "Output format (text, json, table)",
       },
-      short = {"input": 'i', "output": 'o', "format": 'f'},
+      short =
+        {"cidrs": 's', "cidr": 'c', "ips": 'S', "ip": 'i', "output": 'o', "format": 'f'},
     ],
   )

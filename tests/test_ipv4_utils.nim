@@ -6,18 +6,15 @@ import netu/ipaddress
 
 suite "IPv4 - String representation":
   test "convert IPv4 to string":
-    var ip: IpV4
-    ip.octets = [192'u8, 168'u8, 1'u8, 1'u8]
+    let ip = ipv4(192, 168, 1, 1)
     check $ip == "192.168.1.1"
 
   test "convert 0.0.0.0 to string":
-    var ip: IpV4
-    ip.octets = [0'u8, 0'u8, 0'u8, 0'u8]
+    let ip = ipv4(0, 0, 0, 0)
     check $ip == "0.0.0.0"
 
   test "convert 255.255.255.255 to string":
-    var ip: IpV4
-    ip.octets = [255'u8, 255'u8, 255'u8, 255'u8]
+    let ip = ipv4(255, 255, 255, 255)
     check $ip == "255.255.255.255"
 
 suite "IPv4 - Bitwise AND operation":

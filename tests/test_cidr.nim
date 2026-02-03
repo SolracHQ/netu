@@ -8,44 +8,44 @@ suite "CIDR - Parsing from string":
   test "parse valid CIDR notation":
     let cidr = cidr("192.168.1.0/24")
     check cidr.network == ipv4("192.168.1.0")
-    check cidr.prefixLen == 24
+    check cidr.prefixLen == prefixLen(24).PrefixLen
 
   test "parse /32 CIDR (single host)":
     let cidr = cidr("192.168.1.1/32")
     check cidr.network == ipv4("192.168.1.1")
-    check cidr.prefixLen == 32
+    check cidr.prefixLen == prefixLen(32).PrefixLen
 
   test "parse /0 CIDR (entire internet)":
     let cidr = cidr("0.0.0.0/0")
     check cidr.network == ipv4("0.0.0.0")
-    check cidr.prefixLen == 0
+    check cidr.prefixLen == prefixLen(0).PrefixLen
 
   test "parse /8 CIDR":
     let cidr = cidr("10.0.0.0/8")
     check cidr.network == ipv4("10.0.0.0")
-    check cidr.prefixLen == 8
+    check cidr.prefixLen == prefixLen(8).PrefixLen
 
   test "parse /16 CIDR":
     let cidr = cidr("172.16.0.0/16")
     check cidr.network == ipv4("172.16.0.0")
-    check cidr.prefixLen == 16
+    check cidr.prefixLen == prefixLen(16).PrefixLen
 
 suite "CIDR - Creation from IPv4 and prefix":
   test "create CIDR from IPv4 and prefix length":
-    let cidr = cidr(ipv4("192.168.1.0"), 24)
+    let cidr = cidr(ipv4("192.168.1.0"), prefixLen(24))
     check cidr.network == ipv4("192.168.1.0")
-    check cidr.prefixLen == 24
+    check cidr.prefixLen == prefixLen(24)
 
   test "create /32 CIDR":
-    let cidr = cidr(ipv4("8.8.8.8"), 32)
-    check cidr.prefixLen == 32
+    let cidr = cidr(ipv4("8.8.8.8"), prefixLen(32))
+    check cidr.prefixLen == prefixLen(32)
 
 suite "CIDR - Network address normalization":
   test "network address is always normalized (host bits cleared)":
     let cidr1 = cidr("192.168.1.100/24")
     check cidr1.network == ipv4("192.168.1.0")
 
-    let cidr2 = cidr(ipv4("10.0.5.25"), 8)
+    let cidr2 = cidr(ipv4("10.0.5.25"), prefixLen(8))
     check cidr2.network == ipv4("10.0.0.0")
 
     let cidr3 = cidr("172.16.99.88/16")
@@ -57,13 +57,13 @@ suite "CIDR - Network address normalization":
 
   test "strict mode raises error when host bits are set (IPv4 and prefix)":
     expect HostBitsSetError:
-      discard cidr(ipv4("192.168.1.100"), 24, strict = true)
+      discard cidr(ipv4("192.168.1.100"), prefixLen(24), strict = true)
 
   test "allow correct network address in strict mode":
     let cidr1 = cidr("192.168.1.0/24", strict = true)
     check cidr1.network == ipv4("192.168.1.0")
 
-    let cidr2 = cidr(ipv4("10.0.0.0"), 8, strict = true)
+    let cidr2 = cidr(ipv4("10.0.0.0"), prefixLen(8), strict = true)
     check cidr2.network == ipv4("10.0.0.0")
 
   test "strict mode with /32 allows any address":
@@ -269,32 +269,32 @@ suite "CIDR - Overlaps":
 suite "CIDR - Supernet":
   test "supernet from /24 to /16":
     let cidr = cidr("192.168.1.0/24")
-    let super = cidr.supernet(16)
+    let super = cidr.supernet(prefixLen(16))
     check super.network == ipv4("192.168.0.0")
-    check super.prefixLen == 16
+    check super.prefixLen == prefixLen(16)
 
   test "supernet from /24 to /23":
     let cidr = cidr("192.168.1.0/24")
-    let super = cidr.supernet(23)
-    check super.prefixLen == 23
+    let super = cidr.supernet(prefixLen(23))
+    check super.prefixLen == prefixLen(23)
 
   test "supernet from /16 to /8":
     let cidr = cidr("172.16.0.0/16")
-    let super = cidr.supernet(8)
+    let super = cidr.supernet(prefixLen(8))
     check super.network == ipv4("172.0.0.0")
-    check super.prefixLen == 8
+    check super.prefixLen == prefixLen(8)
 
 suite "CIDR - Subnets":
   test "split /24 into /25 subnets":
     let cidr = cidr("192.168.1.0/24")
-    let subs = cidr.subnets(25)
+    let subs = cidr.subnets(prefixLen(25))
     check subs.len == 2
     check subs[0] == cidr("192.168.1.0/25")
     check subs[1] == cidr("192.168.1.128/25")
 
   test "split /24 into /26 subnets":
     let cidr = cidr("192.168.1.0/24")
-    let subs = cidr.subnets(26)
+    let subs = cidr.subnets(prefixLen(26))
     check subs.len == 4
     check subs[0] == cidr("192.168.1.0/26")
     check subs[1] == cidr("192.168.1.64/26")
@@ -303,7 +303,7 @@ suite "CIDR - Subnets":
 
   test "split /22 into /24 subnets":
     let cidr = cidr("192.168.0.0/22")
-    let subs = cidr.subnets(24)
+    let subs = cidr.subnets(prefixLen(24))
     check subs.len == 4
     check subs[0] == cidr("192.168.0.0/24")
     check subs[1] == cidr("192.168.1.0/24")
